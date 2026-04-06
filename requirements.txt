@@ -1,0 +1,5 @@
+confluent-kafka[avro]==2.6.1
+fastavro==1.9.7
+requests==2.32.3
+pytest==8.3.5
+pytest-timeout==2.3.1
