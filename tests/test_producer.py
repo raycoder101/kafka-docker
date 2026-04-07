@@ -1,67 +1,125 @@
 """
-Producer tests covering the patterns used in load_events.py and load_events_avro.py:
-acks=all, keyed messages, JSON payloads, batch production with periodic poll and flush.
+Producer tests: delivery guarantees, partitioning, headers, serialisation.
 """
 import json
 import time
 import uuid
 
-from confluent_kafka import Producer
+import pytest
+from confluent_kafka import KafkaError, Producer
 
 from tests.conftest import BOOTSTRAP_SERVERS
 
 
+def _delivery_report(err, msg, *, results: list):
+    if err:
+        results.append(("error", err))
+    else:
+        results.append(("ok", msg))
 
-class TestProducer:
-    def _make_producer(self):
-        return Producer({
-            "bootstrap.servers": BOOTSTRAP_SERVERS,
-            "acks": "all",
-            "linger.ms": 10,
-            "compression.type": "lz4",
-        })
 
-    def test_produce_keyed_message(self, unique_topic):
+class TestProducerDelivery:
+    def test_produce_and_flush_single_message(self, producer, unique_topic):
         results = []
-        p = self._make_producer()
-        p.produce(unique_topic, key=b"user-001", value=b"hello",
-                  callback=lambda err, msg: results.append(("error", err) if err else ("ok", msg)))
-        p.flush(timeout=15)
+        producer.produce(
+            unique_topic,
+            key=b"k1",
+            value=b"hello-kafka",
+            callback=lambda err, msg: results.append(("error", err) if err else ("ok", msg)),
+        )
+        producer.flush(timeout=15)
+        assert len(results) == 1
+        status, msg = results[0]
+        assert status == "ok", f"Delivery failed: {msg}"
+
+    def test_produce_json_payload(self, producer, unique_topic):
+        payload = json.dumps({"event": "test", "ts": time.time()}).encode()
+        results = []
+        producer.produce(
+            unique_topic,
+            key=b"json-key",
+            value=payload,
+            callback=lambda err, msg: results.append(("error", err) if err else ("ok", msg)),
+        )
+        producer.flush(timeout=15)
         assert results[0][0] == "ok"
 
-    def test_produce_json_payload(self, unique_topic):
+    def test_produce_batch_messages(self, producer, unique_topic):
+        n = 50
         results = []
-        p = self._make_producer()
-        payload = json.dumps({"event_type": "purchase", "user_id": "user-001", "value": 42.5}).encode()
-        p.produce(unique_topic, key=b"user-001", value=payload,
-                  callback=lambda err, msg: results.append(("error", err) if err else ("ok", msg)))
-        p.flush(timeout=15)
-        assert results[0][0] == "ok"
-
-    def test_produce_batch_with_periodic_poll(self, unique_topic):
-        """Mirrors the load script pattern: produce N messages, poll every 10, then flush."""
-        n = 100
-        results = []
-        p = self._make_producer()
         callback = lambda err, msg: results.append(("error", err) if err else ("ok", msg))
         for i in range(n):
-            p.produce(unique_topic, key=f"user-{i % 20:03d}".encode(),
-                      value=json.dumps({"sequence": i}).encode(), callback=callback)
-            if i % 10 == 0:
-                p.poll(0)
-        p.flush(timeout=30)
+            producer.produce(unique_topic, value=f"msg-{i}".encode(), callback=callback)
+        producer.flush(timeout=30)
         assert len(results) == n
-        assert not [r for r in results if r[0] == "error"], "Delivery errors in batch"
+        errors = [r for r in results if r[0] == "error"]
+        assert not errors, f"Delivery errors: {errors}"
+
+    def test_produce_with_message_headers(self, producer, unique_topic):
+        results = []
+        producer.produce(
+            unique_topic,
+            value=b"with-headers",
+            headers={"source": "pytest", "version": "1"},
+            callback=lambda err, msg: results.append(("error", err) if err else ("ok", msg)),
+        )
+        producer.flush(timeout=15)
+        assert results[0][0] == "ok"
+
+    def test_produce_to_specific_partition(self, producer, unique_topic):
+        results = []
+        producer.produce(
+            unique_topic,
+            value=b"partition-pinned",
+            partition=0,
+            callback=lambda err, msg: results.append(("error", err) if err else ("ok", msg)),
+        )
+        producer.flush(timeout=15)
+        status, msg_or_err = results[0]
+        assert status == "ok"
+        assert msg_or_err.partition() == 0
+
+    def test_produce_null_value_tombstone(self, producer, unique_topic):
+        """A None value is a valid Kafka tombstone (used for log compaction deletes)."""
+        results = []
+        producer.produce(
+            unique_topic,
+            key=b"delete-me",
+            value=None,
+            callback=lambda err, msg: results.append(("error", err) if err else ("ok", msg)),
+        )
+        producer.flush(timeout=15)
+        assert results[0][0] == "ok"
+
+
+class TestProducerConfiguration:
+    def test_acks_all_producer_delivers(self, unique_topic):
+        """acks=all should still deliver successfully on a single-node cluster."""
+        p = Producer({
+            "bootstrap.servers": BOOTSTRAP_SERVERS,
+            "acks": "all",
+            "retries": 5,
+        })
+        results = []
+        p.produce(
+            unique_topic,
+            value=b"acks-all",
+            callback=lambda err, msg: results.append(("error", err) if err else ("ok", msg)),
+        )
+        p.flush(timeout=20)
+        assert results[0][0] == "ok"
 
     def test_idempotent_producer(self, unique_topic):
-        """Broker supports idempotent producers — required for exactly-once delivery
-        guarantees needed by the Iceberg sink connector."""
-        results = []
+        """enable.idempotence=true (exactly-once semantics for the producer)."""
         p = Producer({
             "bootstrap.servers": BOOTSTRAP_SERVERS,
             "enable.idempotence": True,
         })
-        p.produce(unique_topic, value=b"idempotent",
-                  callback=lambda err, msg: results.append(("error", err) if err else ("ok", msg)))
+        results = []
+        p.produce(
+            unique_topic,
+            value=b"idempotent",
+            callback=lambda err, msg: results.append(("error", err) if err else ("ok", msg)),
+        )
         p.flush(timeout=20)
         assert results[0][0] == "ok"
