@@ -22,7 +22,6 @@ BOOTSTRAP = "localhost:9092"
 SCHEMA_REGISTRY_URL = "http://localhost:8081"
 TOPIC = "test-events-avro"
 
-
 def parse_args():
     p = argparse.ArgumentParser(description="Query test-events-avro topic")
     p.add_argument("--event-type", help="Filter by event_type")
@@ -123,6 +122,8 @@ def main():
             f"  {e.get('event_type'):<12}"
             f"  {e.get('source'):<18}"
             f"  {e.get('user_id'):<12}"
+            f"  {e.get('timestamp_ms'):<13}"
+            f"  {e.get('session_id'):<8}"
             f"  val={e.get('value'):>7.2f}"
         )
 
