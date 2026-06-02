@@ -8,6 +8,7 @@ import time
 import uuid
 
 from confluent_kafka import Producer
+from datetime import datetime
 
 BOOTSTRAP = "localhost:9092"
 TOPIC = "test-events"
@@ -15,7 +16,7 @@ NUM_EVENTS = 100
 
 EVENT_TYPES = ["page_view", "click", "purchase", "signup", "logout"]
 SOURCES = ["web", "mobile-ios", "mobile-android", "api"]
-
+CURRENT_TIME = datetime.now().isoformat()
 
 def delivery_report(err, msg):
     if err:
@@ -32,7 +33,7 @@ def main():
         "compression.type": "lz4",
     })
 
-    print(f"Producing {NUM_EVENTS} events to '{TOPIC}'...\n")
+    print(f"Producing {NUM_EVENTS} events to '{TOPIC}' on {CURRENT_TIME}...\n")
     for i in range(NUM_EVENTS):
         event = {
             "id": str(uuid.uuid4()),
